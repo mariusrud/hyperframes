@@ -3,6 +3,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MockResizeObserver, reportResize } from "../../hooks/resizeObserverTestUtils";
 import { thumbnailScheduler } from "../lib/thumbnailScheduler";
 import { buildCompositionThumbnailUrl, CompositionThumbnail } from "./CompositionThumbnail";
 
@@ -10,12 +11,6 @@ Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
   configurable: true,
   value: true,
 });
-
-class MockResizeObserver {
-  observe() {}
-  disconnect() {}
-  unobserve() {}
-}
 
 class MockImage {
   static instances: MockImage[] = [];
@@ -144,6 +139,35 @@ describe("CompositionThumbnail", () => {
     expect(tiles[0]?.parentElement?.parentElement?.style.mixBlendMode).toBe(
       "var(--timeline-composition-thumbnail-blend)",
     );
+  });
+
+  it("tiles a wide picture at the clip's measured height, whole", async () => {
+    Object.defineProperty(host, "clientWidth", { configurable: true, value: 500 });
+    Object.defineProperty(host, "clientHeight", { configurable: true, value: 40 });
+    const probe = await renderThumbnail();
+
+    await act(async () => {
+      probe.naturalWidth = 2700;
+      probe.naturalHeight = 1000;
+      probe.onload?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(host.querySelector("img")?.parentElement?.style.width).toBe("108px");
+  });
+
+  it("re-tiles at the height the resize observer reports", async () => {
+    const probe = await renderThumbnail();
+    await act(async () => {
+      probe.naturalWidth = 2700;
+      probe.naturalHeight = 1000;
+      probe.onload?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    act(() => reportResize(500, 40));
+
+    expect(host.querySelector("img")?.parentElement?.style.width).toBe("108px");
   });
 
   it("aborts its scheduled off-DOM image probe when unmounted", async () => {
