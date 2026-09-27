@@ -68,6 +68,9 @@ import { RATE_RANGE } from "@hyperframes/core/audio-automation";
 // below run too — they exercise the extractor in isolation against a
 // synthesized VFR fixture.
 const HAS_FFMPEG = spawnSync("ffmpeg", ["-version"]).status === 0;
+const HAS_ZSCALE =
+  HAS_FFMPEG &&
+  /\szscale\s/.test(spawnSync("ffmpeg", ["-hide_banner", "-filters"]).stdout.toString());
 
 describe("resolveVideoExtractionDuration", () => {
   const metadata = (
@@ -3019,7 +3022,7 @@ describe.skipIf(!HAS_FFMPEG)("extractAllVideoFrames on a VFR source", () => {
   }, 60_000);
 });
 
-describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR extraction", () => {
+describe.skipIf(!HAS_ZSCALE)("forced-SDR HDR extraction", () => {
   let fixtureDir = "";
 
   beforeAll(() => {
@@ -3030,8 +3033,7 @@ describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR ex
     rmSync(fixtureDir, { recursive: true, force: true });
   });
 
-  it("matches Studio's HLG tone map and isolates transformed cache entries", async () => {
-    const source = join(fixtureDir, "hlg-warm.mp4");
+  async function synthesizeHlgClip(path: string): Promise<void> {
     const synthesized = await runFfmpeg([
       "-y",
       "-hide_banner",
@@ -3055,11 +3057,16 @@ describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR ex
       "bt2020nc",
       "-bsf:v",
       "h264_metadata=colour_primaries=9:transfer_characteristics=18:matrix_coefficients=9",
-      source,
+      path,
     ]);
     if (!synthesized.success) {
       throw new Error(`HLG fixture synthesis failed: ${synthesized.stderr.slice(-400)}`);
     }
+  }
+
+  it("matches Studio's HLG tone map and isolates transformed cache entries", async () => {
+    const source = join(fixtureDir, "hlg-warm.mp4");
+    await synthesizeHlgClip(source);
 
     const reference = join(fixtureDir, "studio-reference.png");
     const referenceResult = await runFfmpeg([
@@ -3122,9 +3129,107 @@ describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR ex
       if (!path) throw new Error("expected extracted frame");
       return readFileSync(path);
     };
-    expect(frame(toneMapped)).toEqual(readFileSync(reference));
+    // Same pixels as Studio's tone map, declared as sRGB so Chrome shows them unconverted.
+    const rgb = (path: string): Buffer =>
+      spawnSync("ffmpeg", ["-v", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .stdout;
+    const toneMappedPath = toneMapped.extracted[0]!.framePaths.get(0)!;
+    expect(rgb(toneMappedPath)).toEqual(rgb(reference));
+    expect(pngChunkTypes(toneMappedPath)).toContain("sRGB");
+    expect(pngChunkTypes(toneMappedPath)).not.toContain("cICP");
     expect(frame(plain)).not.toEqual(frame(toneMapped));
+
+    const toneMappedJpg = await extractAllVideoFrames([video("tone-mapped-jpg")], fixtureDir, {
+      fps: 1,
+      outputDir: join(fixtureDir, "tone-mapped-jpg"),
+      format: "jpg",
+      toneMapHdrToSdr: true,
+    });
+    expect(toneMappedJpg.errors).toEqual([]);
+    const jpgPixels = rgb(toneMappedJpg.extracted[0]!.framePaths.get(0)!);
+    const referencePixels = rgb(reference);
+    const worst = Math.max(...[...jpgPixels].map((v, i) => Math.abs(v - referencePixels[i]!)));
+    expect(worst, "tone-mapped jpg against Studio's tone map").toBeLessThanOrEqual(3);
     expect(frame(toneMappedAgain)).toEqual(frame(toneMapped));
+
+    // A macOS ffmpeg that has zscale uses the same tone map, not VideoToolbox.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    try {
+      const mac = await extractAllVideoFrames([video("tone-mapped-mac")], fixtureDir, {
+        fps: 1,
+        outputDir: join(fixtureDir, "tone-mapped-mac"),
+        format: "png",
+        toneMapHdrToSdr: true,
+      });
+      expect(mac.errors).toEqual([]);
+      expect(rgb(mac.extracted[0]!.framePaths.get(0)!)).toEqual(rgb(reference));
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  }, 60_000);
+
+  it("warns once and keeps VideoToolbox, under its own cache key, when a macOS ffmpeg has no zscale", async () => {
+    const source = join(fixtureDir, "hlg-no-zscale.mp4");
+    await synthesizeHlgClip(source);
+    const cacheDir = join(fixtureDir, "no-zscale-cache");
+    const clip = (id: string): VideoElement => ({
+      id,
+      src: source,
+      start: 0,
+      end: 1,
+      mediaStart: 0,
+      loop: false,
+      hasAudio: false,
+    });
+    const options = (id: string) => ({
+      fps: 1,
+      outputDir: join(fixtureDir, id),
+      format: "png" as const,
+      toneMapHdrToSdr: true,
+    });
+    const zscale = await extractAllVideoFrames(
+      [clip("zscale")],
+      fixtureDir,
+      options("zscale"),
+      undefined,
+      {
+        extractCacheDir: cacheDir,
+      },
+    );
+    expect(zscale.errors).toEqual([]);
+
+    const realPlatform = process.platform;
+    vi.resetModules();
+    vi.doMock("../utils/psnrFilterAvailability.js", () => ({
+      isFfmpegFilterAvailable: async () => false,
+      isPsnrFilterAvailable: async () => false,
+    }));
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const { extractAllVideoFrames: extractOnMac } = await import("./videoFrameExtractor.js");
+      for (const [i, id] of ["no-zscale-1", "no-zscale-2"].entries()) {
+        const result = await extractOnMac([clip(id)], fixtureDir, options(id), undefined, {
+          extractCacheDir: cacheDir,
+        });
+        // The zscale frames above must not be served for the VideoToolbox path.
+        if (i === 0) expect(result.phaseBreakdown.cacheHits).toBe(0);
+        // Off macOS the VideoToolbox decode itself fails, which proves it was attempted.
+        if (realPlatform !== "darwin")
+          expect(JSON.stringify(result.errors)).toMatch(/videotoolbox/i);
+      }
+      const zscaleWarnings = stderr.mock.calls.filter(([message]) =>
+        String(message).includes("no zscale filter"),
+      );
+      expect(zscaleWarnings).toHaveLength(1);
+    } finally {
+      stderr.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+      vi.doUnmock("../utils/psnrFilterAvailability.js");
+      vi.resetModules();
+    }
   }, 60_000);
 
   // A second process would read the frames back without the HDR10 light-level metadata the tone map uses.
@@ -3162,7 +3267,7 @@ describe.skipIf(!HAS_FFMPEG || process.platform === "darwin")("forced-SDR HDR ex
       "-t",
       "0.616666",
       "-vf",
-      "zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv",
+      "zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,setparams=color_primaries=bt709:color_trc=iec61966-2-1",
       "-fps_mode",
       "cfr",
       "-r",
