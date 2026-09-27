@@ -2,6 +2,7 @@ import { openComposition, type Composition } from "@hyperframes/sdk";
 import { hashContent, markSelfWrite } from "../hooks/sdkSelfWriteRegistry";
 import { trackStudioEvent } from "./studioTelemetry";
 import { serializeStudioFileMutation } from "./studioFileMutationCoordinator";
+import { syncRootLength } from "./timelineAssetDrop";
 import type { StudioSdkOperationFamily } from "./sdkCutoverPolicy";
 import {
   StudioFileConflictError,
@@ -61,6 +62,7 @@ export interface CutoverOptions {
   /** Coalesce window (ms); Infinity folds across a slow round-trip. */
   coalesceMs?: number;
   skipRefresh?: boolean;
+  animationEnd?: number;
 }
 
 interface CandidateEdit {
@@ -332,6 +334,8 @@ export async function persistSdkCandidateMutation(
       const candidateSource = deps.readProjectFile ? onDiskBefore : sourceSnapshot;
       const candidate = await buildCandidateEdit(live, deps, mutate, candidateSource);
       if (isCutoverResult(candidate)) return candidate;
+      if (options?.animationEnd !== undefined)
+        candidate.after = syncRootLength(onDiskBefore, candidate.after, options.animationEnd);
       return commitCandidateEdit(candidate, targetPath, onDiskBefore, deps, options);
     },
   );

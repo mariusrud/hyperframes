@@ -1,13 +1,37 @@
 import { formatTimelineAttributeNumber } from "../player/components/timelineEditing";
+import { parseCompositionSource } from "../player/lib/timelineElementHelpers";
 
-/**
- * Matches the opening tag of the ROOT composition element — the first tag that
- * carries a `data-composition-id` attribute, regardless of where the attribute
- * sits in the tag or how its value is quoted. `[^>]*` keeps the match inside a
- * single tag, so the first hit is the first composition in document order (the
- * same element `doc.querySelector("[data-composition-id]")` resolves to).
- */
-const ROOT_COMPOSITION_OPEN_TAG_RE = /<[^>]*\bdata-composition-id(?=[\s=/>])[^>]*>/i;
+// Consumed whole, as the parser reads them: comments (malformed and unclosed too), script and
+// style text, and every other tag, so no scan restarts inside one and each stays linear.
+const UNREAD = String.raw`<!--(?:-?>|[\s\S]*?--!?>|[\s\S]*$)|<(script|style)(?=[\s/>])[\s\S]*?(?:<\/\1(?=[\s/>])[^>]*>?|$)`;
+const TAG_RE = new RegExp(String.raw`${UNREAD}|(?<tag><[a-z][^>]*>?)`, "gi");
+// Tested on the matched tag, outside the scan, so a tag with no `>` is never rescanned. The
+// separator before the attribute (whitespace, `/` or a closing quote, as the parser splits
+// attributes) keeps a `<data-composition-id>` element from counting.
+const isCompositionTag = (tag: string) =>
+  tag.endsWith(">") && /[\s/"']data-composition-id(?=[\s=/>])/i.test(tag);
+const isTemplateTag = (tag: string) => /^<template(?=[\s/>])/i.test(tag);
+
+function findTag(
+  source: string,
+  accept: (tag: string) => boolean,
+  from = 0,
+): RegExpExecArray | null {
+  TAG_RE.lastIndex = from;
+  for (let match = TAG_RE.exec(source); match; match = TAG_RE.exec(source)) {
+    const tag = match.groups?.tag;
+    if (tag !== undefined && accept(tag)) return match;
+  }
+  return null;
+}
+
+/** The tag parseCompositionSource reads as the root: a registry scene's is inside its template. */
+export function findRootOpenTag(source: string): RegExpExecArray | null {
+  const first = findTag(source, isCompositionTag);
+  if (!first || !/^<html(?=[\s/>])/i.test(first[0])) return first;
+  const template = findTag(source, isTemplateTag);
+  return (template && findTag(source, isCompositionTag, template.index)) ?? first;
+}
 
 /**
  * Matches a `data-duration="..."` attribute inside a single opening tag. Quote
@@ -33,10 +57,11 @@ const DATA_DURATION_ATTR_RE = /(\bdata-duration\s*=\s*)(["'])[^"']*\2/i;
  * Deterministic and render-safe: DOMParser is the only DOM global used.
  */
 export function readRootCompositionDuration(source: string): number | null {
-  const root = new DOMParser()
-    .parseFromString(source, "text/html")
-    .querySelector("[data-composition-id]");
-  const raw = root?.getAttribute("data-duration");
+  return readDocumentRootDuration(parseCompositionSource(source));
+}
+
+export function readDocumentRootDuration(doc: ParentNode | null | undefined): number | null {
+  const raw = doc?.querySelector("[data-composition-id]")?.getAttribute("data-duration");
   if (raw == null) return null;
   return Number.parseFloat(raw);
 }
@@ -56,7 +81,7 @@ export function readRootCompositionDuration(source: string): number | null {
  * root tag has no `data-duration` attribute to replace.
  */
 export function patchRootCompositionDuration(source: string, newValue: string): string {
-  const rootTag = ROOT_COMPOSITION_OPEN_TAG_RE.exec(source);
+  const rootTag = findRootOpenTag(source);
   if (!rootTag) return source;
   const patchedTag = rootTag[0].replace(
     DATA_DURATION_ATTR_RE,
