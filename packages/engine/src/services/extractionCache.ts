@@ -66,8 +66,10 @@ export const GC_MARKER = ".hf-last-gc";
  * v3 -> v4: the target fps identity is the exact FFmpeg argument instead of
  * a JavaScript number. This invalidates entries created after rational NTSC
  * rates had already been rounded to a decimal.
+ * v4 -> v5: each CFR slot samples the frame on screen at its time instead of
+ * the last frame ffmpeg rounds into it, changing frames below the source fps.
  */
-export const SCHEMA_PREFIX = "hfcache-v4-";
+export const SCHEMA_PREFIX = "hfcache-v5-";
 
 /** Truncated hex chars of SHA-256 used for the entry directory name. */
 const KEY_HEX_CHARS = 16;

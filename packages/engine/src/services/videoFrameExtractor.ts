@@ -832,6 +832,8 @@ export async function extractVideoFramesRange(
     // a negative timestamp base) can seek to EOF and emit zero frames.
     args.push("-i", videoPath, "-ss", String(startTime), "-frames:v", "1");
   } else {
+    // CFR sampling keeps the frame on screen at startTime, which an accurate seek drops.
+    if (!metadata.isVFR) args.push("-noaccurate_seek");
     args.push("-ss", String(startTime), "-i", videoPath, "-t", String(duration));
   }
 
@@ -841,7 +843,8 @@ export async function extractVideoFramesRange(
     vfFilters.push("format=nv12");
   }
   if (!options.finalFrameOnly && !metadata.isVFR) {
-    vfFilters.push(`fps=${ffmpegFps}`);
+    // Each slot takes the last frame at or before its time, as a seeked <video> shows it.
+    vfFilters.push(`fps=${ffmpegFps}:start_time=0:round=up`);
   }
   if (options.sdrToHdrTransfer) {
     // Ordering intent: fps sampling runs BEFORE the colorspace remap so only

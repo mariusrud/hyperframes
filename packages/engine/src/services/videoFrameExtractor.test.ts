@@ -1492,6 +1492,84 @@ describe.skipIf(!HAS_FFMPEG)("video frame extraction format", () => {
   }, 60_000);
 });
 
+// A seeked <video> shows the last frame at or before the seek time; renders must sample the same one.
+describe.skipIf(!HAS_FFMPEG)("frame sampling below the source frame rate", () => {
+  const FIXTURE_DIR = mkdtempSync(join(tmpdir(), "hf-video-frame-sampling-"));
+  const SOURCE = join(FIXTURE_DIR, "index-60fps.mp4");
+  const SOURCE_FPS = 60;
+
+  beforeAll(async () => {
+    // Frame k carries luma 16 + 2k, so each extracted frame names its source index.
+    const result = await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `nullsrc=s=32x16:r=${SOURCE_FPS}:d=1.5,geq=lum='16+2*N':cb=128:cr=128`,
+      "-c:v",
+      "libx264",
+      "-qp",
+      "0",
+      "-pix_fmt",
+      "yuv420p",
+      SOURCE,
+    ]);
+    if (!result.success) throw new Error(`index fixture synthesis failed: ${result.stderr}`);
+  }, 30_000);
+
+  afterAll(() => {
+    rmSync(FIXTURE_DIR, { recursive: true, force: true });
+  });
+
+  function sourceIndexes(extracted: ExtractedFrames): number[] {
+    const decoded = spawnSync("ffmpeg", [
+      "-v",
+      "error",
+      "-i",
+      join(extracted.outputDir, extracted.framePattern),
+      "-f",
+      "rawvideo",
+      "-pix_fmt",
+      "gray",
+      "pipe:1",
+    ]);
+    if (decoded.status !== 0) throw new Error(decoded.stderr.toString());
+    const indexes: number[] = [];
+    for (let offset = 0; offset < decoded.stdout.length; offset += 32 * 16) {
+      indexes.push(Math.round(((decoded.stdout[offset] ?? 0) * 219) / 255 / 2));
+    }
+    return indexes;
+  }
+
+  it.each([
+    { fps: 24, startTime: 0, duration: 0.5 },
+    { fps: 10, startTime: 0.37, duration: 0.6 },
+  ])(
+    "samples the frame on screen at each $fps fps slot from $startTime s",
+    async (c) => {
+      const extracted = await extractVideoFramesRange(
+        SOURCE,
+        `s${c.fps}`,
+        c.startTime,
+        c.duration,
+        {
+          fps: c.fps,
+          outputDir: FIXTURE_DIR,
+          format: "png",
+        },
+      );
+      const onScreen = Array.from({ length: Math.round(c.duration * c.fps) }, (_, i) =>
+        Math.floor((c.startTime + i / c.fps) * SOURCE_FPS + 1e-9),
+      );
+      expect(sourceIndexes(extracted)).toEqual(onScreen);
+    },
+    30_000,
+  );
+});
+
 describe.skipIf(!HAS_FFMPEG)("held tails on sparse-timestamp sources", () => {
   const fixtureDir = mkdtempSync(join(tmpdir(), "hf-sparse-held-tail-"));
   const cfrFixture = join(fixtureDir, "sub-1fps-cfr.mp4");
