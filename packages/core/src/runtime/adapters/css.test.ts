@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { createCssAdapter } from "./css";
 
-// jsdom has no Animation subclasses; the adapter tells them apart with instanceof CSSAnimation.
+// jsdom has no Animation subclasses; the adapter tells a CSSAnimation by its animationName.
 class FakeAnimation {}
-class FakeCSSAnimation extends FakeAnimation {}
+class FakeCSSAnimation extends FakeAnimation {
+  animationName = "slide";
+}
 class FakeCSSTransition extends FakeAnimation {}
 
 const makeAnimation = (target: Element, kind: typeof FakeAnimation = FakeCSSAnimation) =>
@@ -354,6 +356,15 @@ describe("css adapter", () => {
         expect(other.pause).not.toHaveBeenCalled();
         expect(other.play).not.toHaveBeenCalled();
       }
+    });
+
+    it("seeks a CSSAnimation from another realm, which is no instance of this one's", () => {
+      const animation = Object.assign(makeAnimation(el, FakeAnimation), { animationName: "slide" });
+      const { adapter } = setup([animation]);
+
+      adapter.seek({ time: 3 });
+
+      expect(animation.currentTime).toBe(2000);
     });
 
     it("seeks every animation where the browser has no CSSAnimation to tell them apart", () => {

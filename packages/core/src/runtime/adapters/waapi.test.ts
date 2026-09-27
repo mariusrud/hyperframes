@@ -40,7 +40,9 @@ describe("waapi adapter", () => {
 
   beforeEach(() => {
     (globalThis as { document?: unknown }).document = {
+      nodeType: 9,
       getAnimations: vi.fn(() => []),
+      querySelectorAll: vi.fn(() => []),
     };
   });
 
@@ -284,6 +286,141 @@ describe("waapi adapter", () => {
         (globalThis as { Element?: unknown }).Element = originalElement;
       }
     }
+  });
+
+  describe("CSS animations start with their clip", () => {
+    // Structural stand-ins: a CSSAnimation has animationName; a ShadowRoot is a fragment with a host.
+    const inTree = (root: object) => ({ getRootNode: () => root, closest: () => null });
+    const makeCssAnimation = (target: object, currentTime = 0) =>
+      Object.assign(makeAnimation(currentTime), { animationName: "slide", effect: { target } });
+    const adapterWithStarts = (starts: Map<object, number>) =>
+      createWaapiAdapter({ resolveStartSeconds: (element) => starts.get(element) ?? 0 });
+    // The page's clips; the ones in `hidden` have no box.
+    const clipsOnPage = (clips: object[], hidden = new Set<object>()) => {
+      for (const clip of clips) Object.assign(clip, { checkVisibility: () => !hidden.has(clip) });
+      (document as any).querySelectorAll = vi.fn(() => clips);
+      return hidden;
+    };
+
+    it("seeks to clip time however long the animation ran before it was first tracked", () => {
+      const animation = makeCssAnimation(inTree(document), 437);
+      setAnimations([animation]);
+
+      const adapter = adapterWithStarts(new Map());
+      adapter.discover();
+      adapter.seek({ time: 2 });
+
+      expect(animation.currentTime).toBe(2000);
+    });
+
+    it("anchors a pseudo-element's animation at its owner's clip start", () => {
+      const owner = inTree(document);
+      const animation = Object.assign(makeCssAnimation(owner, 250), {
+        effect: { target: owner, pseudoElement: "::before" },
+      });
+      setAnimations([animation]);
+
+      const adapter = adapterWithStarts(new Map([[owner, 3]]));
+      adapter.discover();
+      adapter.seek({ time: 4 });
+
+      expect(animation.currentTime).toBe(1000);
+    });
+
+    it("anchors an animation in nested shadow roots at the outer host's clip start", () => {
+      const outerHost = inTree(document);
+      const outer = { nodeType: 11, host: outerHost };
+      const inner = { nodeType: 11, host: inTree(outer) };
+      const animation = makeCssAnimation(inTree(inner), 180);
+      setAnimations([animation]);
+
+      const adapter = adapterWithStarts(new Map([[outerHost, 3]]));
+      adapter.discover();
+      adapter.seek({ time: 4 });
+
+      expect(animation.currentTime).toBe(1000);
+    });
+
+    it("keeps anchoring a script-created animation where it was first seen", () => {
+      const target = inTree(document);
+      const animation = Object.assign(makeAnimation(700), { effect: { target } });
+      setAnimations([animation]);
+
+      const adapter = adapterWithStarts(new Map([[target, 3]]));
+      adapter.discover();
+      adapter.seek({ time: 1 });
+
+      expect(animation.currentTime).toBe(1700);
+    });
+
+    it("keeps scanning once its CSS animations are cancelled, so a re-shown clip's are seeked", () => {
+      const el = inTree(document);
+      const hidden = makeCssAnimation(el);
+      const listeners = new Map<string, EventListener>();
+      hidden.addEventListener.mockImplementation((type: string, listener: EventListener) => {
+        listeners.set(type, listener);
+      });
+      const getAnimations = setAnimations([hidden]);
+      const hiddenClips = clipsOnPage([el]);
+
+      const adapter = adapterWithStarts(new Map([[el, 3]]));
+      adapter.discover();
+      listeners.get("cancel")?.({} as Event);
+      getAnimations.mockReturnValue([]);
+      hiddenClips.add(el);
+      adapter.seek({ time: 2 });
+      hiddenClips.delete(el);
+      const shown = makeCssAnimation(el);
+      getAnimations.mockReturnValue([shown]);
+      adapter.seek({ time: 4 });
+
+      expect(shown.currentTime).toBe(1000);
+    });
+
+    describe("one that something starts while its clip is on screen", () => {
+      // First seen at 2 s in a clip rendered from 0; another CSS animation keeps the scan on.
+      const secondsIntoIt = (animation: ReturnType<typeof makeCssAnimation>, clips: object[]) => {
+        clipsOnPage(clips);
+        const other = makeCssAnimation(inTree(document));
+        const getAnimations = setAnimations([other]);
+        const adapter = adapterWithStarts(new Map());
+        adapter.discover();
+        adapter.seek({ time: 1.9 });
+        getAnimations.mockReturnValue([other, animation]);
+        adapter.seek({ time: 2 });
+        adapter.seek({ time: 2.5 });
+        return animation.currentTime;
+      };
+
+      it("starts where it was first seen when a class adds it, whatever its wall-clock time", () => {
+        const el = inTree(document);
+        expect(secondsIntoIt(makeCssAnimation(el, 437), [el])).toBe(500);
+      });
+
+      it("starts where it was first seen on a ::before", () => {
+        const owner = inTree(document);
+        const animation = Object.assign(makeCssAnimation(owner), {
+          effect: { target: owner, pseudoElement: "::before" },
+        });
+        expect(secondsIntoIt(animation, [owner])).toBe(500);
+      });
+
+      it("starts where it was first seen on an element appended into the clip", () => {
+        const clip = inTree(document);
+        const appended = { getRootNode: () => document, closest: () => clip };
+        expect(secondsIntoIt(makeCssAnimation(appended), [clip])).toBe(500);
+      });
+    });
+
+    it("infers the duration from the clip start", () => {
+      const owner = inTree(document);
+      const animation = Object.assign(makeCssAnimation(owner), {
+        effect: { target: owner, getComputedTiming: () => ({ endTime: 4000 }) },
+      });
+      setAnimations([animation]);
+
+      expect(adapterWithStarts(new Map([[owner, 3]])).getInferredDurationSeconds?.()).toBe(7);
+    });
   });
 
   describe("getInferredDurationSeconds", () => {

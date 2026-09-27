@@ -1,6 +1,7 @@
 import type { RuntimeDeterministicAdapter } from "../types";
 import { swallow } from "../diagnostics";
 import { isHtmlElement } from "../domRealm";
+import { clipStartSeconds, cssClip, isCssAnimation } from "./cssAnimation";
 
 export function createCssAdapter(params?: {
   resolveStartSeconds?: (element: Element) => number;
@@ -31,7 +32,7 @@ export function createCssAdapter(params?: {
     if (entries.length === 0) return byElement;
     const canTellCss = typeof CSSAnimation !== "undefined";
     for (const animation of safeGetAnimations(document, pageAnimations)) {
-      if (canTellCss && !(animation instanceof CSSAnimation)) continue;
+      if (canTellCss && !isCssAnimation(animation)) continue;
       const effect = animation.effect as KeyframeEffect | null;
       if (!effect?.target || effect.pseudoElement) continue;
       const list = byElement.get(effect.target);
@@ -47,12 +48,8 @@ export function createCssAdapter(params?: {
     ...known.filter((animation) => !scanned.includes(animation) && animation.playState !== "idle"),
   ];
 
-  const resolveEntryStartSeconds = (el: HTMLElement): number => {
-    const clip = el.closest("[data-start]") ?? el;
-    return params?.resolveStartSeconds
-      ? params.resolveStartSeconds(clip)
-      : Number.parseFloat(clip.getAttribute("data-start") ?? "0") || 0;
-  };
+  const resolveEntryStartSeconds = (el: HTMLElement): number =>
+    clipStartSeconds(cssClip(el), params?.resolveStartSeconds);
 
   // Computed lists pair by index, repeating the shorter; unlike getAnimations(), they outlive display:none.
   const readAnimationTimes = (style: CSSStyleDeclaration) => {

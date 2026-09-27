@@ -248,10 +248,20 @@ const SLOW_IDLE_HEARTBEAT_MS = 1000;
 // GSAP `data` on the tweens the runtime adds to stretch a timeline; never animation.
 const RUNTIME_FILLER = "hf-runtime-filler";
 
-// One document.getAnimations() per seek and the pause after it, read on first use, shared by all adapters.
-function pageAnimationsForOnePass(): () => Animation[] {
+// document.getAnimations() skips shadow trees; each open shadow root lists its own.
+function findShadowRoots(scope: ParentNode, found: ShadowRoot[] = []): ShadowRoot[] {
+  for (const el of scope.querySelectorAll("*")) {
+    if (!el.shadowRoot) continue;
+    found.push(el.shadowRoot);
+    findShadowRoots(el.shadowRoot, found);
+  }
+  return found;
+}
+
+// One page scan per seek and the pause after it, read on first use, shared by all adapters.
+function pageAnimationsForOnePass(read: () => Animation[]): () => Animation[] {
   let list: Animation[] | undefined;
-  return () => (list ??= document.getAnimations());
+  return () => (list ??= read());
 }
 
 export function initSandboxRuntimeModular(): void {
@@ -3062,11 +3072,17 @@ export function initSandboxRuntimeModular(): void {
     postState(true);
   };
 
+  // Found at each discover: a shadow root attached later waits for the next one.
+  let shadowRoots: ShadowRoot[] = [];
+  const readPageAnimations = () =>
+    [document, ...shadowRoots].flatMap((scope) => scope.getAnimations());
+
   const runAdapters = (
     method: "discover" | "pause" | "play",
     timeSeconds = 0,
     pageAnimations?: () => Animation[],
   ) => {
+    if (method === "discover") shadowRoots = findShadowRoots(document);
     for (const adapter of state.deterministicAdapters) {
       try {
         if (method === "discover") adapter.discover();
@@ -3583,15 +3599,12 @@ export function initSandboxRuntimeModular(): void {
     compositionId: findRootCompositionElement()?.getAttribute("data-composition-id") ?? null,
   });
 
+  const resolveStartSeconds = (element: Element) => resolveStartForElement(element, 0);
   state.deterministicAdapters = [
-    createWaapiAdapter(),
-    createCssAdapter({
-      resolveStartSeconds: (element) => resolveStartForElement(element, 0),
-    }),
+    createWaapiAdapter({ resolveStartSeconds, readPageAnimations }),
+    createCssAdapter({ resolveStartSeconds }),
     createAnimeJsAdapter(),
-    createLottieAdapter({
-      resolveStartSeconds: (element) => resolveStartForElement(element, 0),
-    }),
+    createLottieAdapter({ resolveStartSeconds }),
     createThreeAdapter(),
     createMapboxAdapter(),
     createLeafletAdapter(),
@@ -3963,7 +3976,7 @@ export function initSandboxRuntimeModular(): void {
     // the deterministic adapters, syncTimedElementVisibility, the hf-timelines-built
     // handler and __hfReseekGpu. It only ever moved the state the seek left behind.
     seekStandaloneRegisteredTimelines(t, opts);
-    const pageAnimations = pageAnimationsForOnePass();
+    const pageAnimations = pageAnimationsForOnePass(readPageAnimations);
     for (const adapter of state.deterministicAdapters) {
       if (adapter.name === "gsap" && tl) continue;
       try {
