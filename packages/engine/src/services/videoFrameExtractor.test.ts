@@ -1497,6 +1497,8 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling below the source frame rate", () =>
   const FIXTURE_DIR = mkdtempSync(join(tmpdir(), "hf-video-frame-sampling-"));
   const SOURCE = join(FIXTURE_DIR, "index-60fps.mp4");
   const SOURCE_FPS = 60;
+  const WIDTH = 32;
+  const HEIGHT = 16;
 
   beforeAll(async () => {
     // Frame k carries luma 16 + 2k, so each extracted frame names its source index.
@@ -1508,7 +1510,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling below the source frame rate", () =>
       "-f",
       "lavfi",
       "-i",
-      `nullsrc=s=32x16:r=${SOURCE_FPS}:d=1.5,geq=lum='16+2*N':cb=128:cr=128`,
+      `nullsrc=s=${WIDTH}x${HEIGHT}:r=${SOURCE_FPS}:d=1.5,geq=lum='16+2*N':cb=128:cr=128`,
       "-c:v",
       "libx264",
       "-qp",
@@ -1538,7 +1540,7 @@ describe.skipIf(!HAS_FFMPEG)("frame sampling below the source frame rate", () =>
     ]);
     if (decoded.status !== 0) throw new Error(decoded.stderr.toString());
     const indexes: number[] = [];
-    for (let offset = 0; offset < decoded.stdout.length; offset += 32 * 16) {
+    for (let offset = 0; offset < decoded.stdout.length; offset += WIDTH * HEIGHT) {
       indexes.push(Math.round(((decoded.stdout[offset] ?? 0) * 219) / 255 / 2));
     }
     return indexes;
